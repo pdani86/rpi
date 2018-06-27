@@ -1,0 +1,430 @@
+<html>
+<head>
+<title>Raspberry Web Interface</title>
+<link rel="shortcut icon" type="image/png" href="favicon.png" />
+
+<script type="text/javascript" src="js/ext/jquery.min.js"></script>
+
+<script>
+
+var led0_pc;
+var fan0_pc;
+var fan0_rpm;
+
+function parseParams(str) {
+	var params = {};
+	var lines = str.split("\r\n");
+	for(var i=0;i<lines.length;i++) {
+		var name_val = lines[i].split("=");
+		if(name_val.length==1) {
+			var name = name_val[0];
+			if(name!="") params[name] = "";
+		} else if(name_val.length==2) {
+			var name = name_val[0];
+			if(name!="") params[name] = name_val[1];
+		}
+	}
+	return params;
+}
+
+function init() {
+	led0_pc = document.getElementById("led0_pc");
+	fan0_pc = document.getElementById("fan0_pc");
+	fan0_rpm = document.getElementById("fan0_rpm");
+	/*var liveimage = new Image();
+	liveimage.src = "http://admin:x@"+location.hostname+":8001";
+	document.body.appendChild(liveimage);*/
+	init_pca9685();
+	update();
+	
+	$("#test_canvas").click(canvas_clicked);
+	updateCanvas();
+}
+
+function update_pca9685_gui(params) {
+	if("pca9685_prescale" in params) {
+		var prescale = parseFloat(params["pca9685_prescale"]);
+		var OSC = 25*1000*1000;
+		var freq = OSC/(4096*(prescale+1));
+		$("#pca9685_pwm_freq").val(Math.round(freq));
+	}
+	for(var i=0;i<16;i++) {
+		var name = "pca9685_out_"+i+"_off";
+		if(!(name in params)) continue;
+		var input_id = name;
+		var input = $("#"+input_id);
+		input.val(params[name]);
+	}
+}
+function update_pca9685() {
+	var xhr = new XMLHttpRequest();
+	xhr.onload = function() {
+		var params = parseParams(xhr.responseText);
+		update_pca9685_gui(params);
+	};
+	xhr.open("GET","/api?getall",true);
+	xhr.send();
+}
+
+var update_loop_running = false;
+function startPolling()
+{
+	update_loop_running = true;
+	var loopFunc = function(cb) {
+		if(!update_loop_running) return;
+			update(function() {
+				setTimeout(loopFunc,50);
+		});
+	};
+	
+	loopFunc();
+}
+
+function stopPolling() {update_loop_running = false;}
+
+function update(cb) {
+	var xhr = new XMLHttpRequest();
+	xhr.onload = function() {
+		var params = parseParams(xhr.responseText);
+		/*if("led0_pc" in params) {
+			led0_pc.value = params.led0_pc;
+		}*/
+		if("adc_value" in params) {
+			var adcVal = params["adc_value"];
+			adcVal = parseInt(adcVal) - 0x8000;
+			//adcVal = adcVal / 0xffff * 2.0;
+			adcVal = adcVal / 0x8000 * 2.0;
+			var adcPercent = adcVal * 100.0;
+			adcPercent = adcPercent.toFixed(3);
+			$("#adc_ch0").val(adcPercent + " %");
+			
+			
+			//
+			/*var setVal = parseInt(adcVal*4095);
+			if(setVal>4095) setVal = 4095;
+			send_params({"pca9685_out_0_off": setVal});*/
+			//
+			
+		}
+		
+		if("fan0_pc" in params) {
+			//fan0_pc.value = params.fan0_pc;
+			var chk = document.getElementById("fan0_chk");
+			if(chk!=null) chk.checked = params.fan0_pc!="0";
+		}
+		/*if("fan0_rpm" in params) {
+			fan0_rpm.value = params.fan0_rpm;
+		}*/
+		update_pca9685_gui(params);
+		
+		if(cb) cb();
+	};
+	xhr.open("GET","/api?getall",true);
+	xhr.send();
+}
+
+function send() {
+	var xhr = new XMLHttpRequest();
+	xhr.onload = function() {};
+	var led_value = led0_pc.value;
+	var fan_value = fan0_pc.value;
+	xhr.open("GET","/api?led0_pc="+led_value+"&fan0_pc="+fan_value,true);
+	xhr.send();
+}
+
+function send_params(params,cb) {
+	var xhr = new XMLHttpRequest();
+	//xhr.onload = function() {};
+	xhr.onreadystatechange = function() {if(xhr.readyState!=4) return; if(cb) cb();};
+	var str = "";
+	for(var name in params) {
+		var val = params[name];
+		str += name+"="+val+"&";
+	}
+	xhr.open("GET","/api?"+str,true);
+	xhr.send();
+}
+
+function init_pca9685() {
+
+	$("#pca9685_update_btn").bind("click",function() {update_pca9685();});
+	$("#pca9685_pwm_freq_set_btn").bind("click",function() {
+		var freq = $("#pca9685_pwm_freq").val();
+		var params = {};
+		var OSC = 25*1000*1000;
+		var prescale = Math.round(OSC/(4096*freq))-1;
+		params["pca9685_prescale"] = prescale;
+		send_params(params);
+	});
+
+	var container = $("#pca9685_channels_div");
+	for(var i=0;i<16;i++) {
+		var line = $("<div>");
+		var label = $("<label>");
+		label.text("OUT["+i+"]:");
+		var input = $("<input id='pca9685_out_"+i+"_off' type='number'>");
+		var setBtn = $("<input type='button' value='Set'>");
+		
+		input.data("out_ix",i);
+		input.data("out_input",input);
+		setBtn.data("out_ix",i);
+		setBtn.data("out_input",input);
+		line.append(label);
+		line.append(input);
+		line.append(setBtn);
+		
+		var setFunc = function() {
+			var $this = $(this);
+			var ix = $this.data("out_ix");
+			var input = $this.data("out_input");
+			//console.log("SET "+ix+" "+input.val());
+			var params = {};
+			params["pca9685_out_"+ix+"_off"] = input.val();
+			send_params(params);
+		};
+		
+		setBtn.bind("click",setFunc);
+		input.bind("change",setFunc);
+		
+		container.append(line);
+	}
+	
+}
+
+function hsv2rgb(h,s,v) {
+	//var rgb = [h/360*255,0,0];
+	
+	var C = v * s;
+	var m = v - C;
+	
+	var HH = h/60.0;
+	var X = C * (1-Math.abs((HH%2)-1));
+	var R = 0;
+	var G = 0;
+	var B = 0;
+	if(HH>=0 && HH<=1) {
+		R = C;
+		G = X;
+	} else if(HH>=1 && HH<=2) {
+		R = X;
+		G = C;
+	} else if(HH>=2 && HH<=3) {
+		G = C;
+		B = X;
+	} else if(HH>=3 && HH<=4) {
+		G = X;
+		B = C;
+	} else if(HH>=4 && HH<=5) {
+		R = X;
+		B = C;
+	} else if(HH>=5 && HH<=6) {
+		R = C;
+		B = X;
+	} else {
+	}
+	
+	//return rgb;
+	R += m;
+	G += m;
+	B += m;
+	return [R,G,B];
+}
+
+function updateCanvas() {
+	var canvas = $("#test_canvas");
+	var ctx = canvas[0].getContext("2d");
+	var imgData = ctx.createImageData(360,100);
+	var sline = 4*360;
+	for(var row=0;row<100;row++) {
+		for(var col=0;col<360;col++) {
+			var h = col;
+			//var s = row/99;
+			var s = 1.0;
+			var v = 1.0;
+			
+			var ix = row*sline+col*4;
+			var rgb = hsv2rgb(h,s,v);
+			imgData.data[ix] = rgb[0]*255;
+			imgData.data[ix+1] = rgb[1]*255;
+			imgData.data[ix+2] = rgb[2]*255;
+			imgData.data[ix+3] = 255;
+		}
+	}
+	ctx.putImageData(imgData,0,0);
+}
+
+var time0 = new Date().getTime();
+
+var enableSine = false;
+function startSine(period) {
+	enableSine = true;
+	var updateSine = function() {
+		var time = new Date().getTime();
+		time = time-time0;
+		var t = (time/1000.0)/period;
+		var w = 2*Math.PI*t;
+		var deg90 = Math.PI/2;
+		
+		var deg120 = Math.PI*2/3;
+		deg90 = deg120; //cheat
+		
+		var half = 4095/2.0;
+		var val = half*Math.sin(w)+half;
+		var val2 = half*Math.sin(w+deg90)+half;
+		var val3 = half*Math.sin(w+2*deg90)+half;
+		var val4 = half*Math.sin(w+3*deg90)+half;
+		val = Math.round(val);
+		val2 = Math.round(val2);
+		val3 = Math.round(val3);
+		val4 = Math.round(val4);
+		var params = {};	
+		params["pca9685_out_0_off"] = val;
+		params["pca9685_out_1_off"] = val2;
+		params["pca9685_out_2_off"] = val3;
+		params["pca9685_out_3_off"] = val4;
+		send_params(params,function() {
+			if(enableSine) setTimeout(updateSine,5);
+		});
+		
+	};
+	updateSine();
+}
+
+function stopSine() {
+	enableSine = false;
+}
+
+function canvas_clicked(e) {
+	//console.log(e.clientX+", "+e.clientY);
+	var x = e.offsetX;
+	var y = e.offsetY;
+	//var rgb = hsv2rgb(x,y/99,1.0);
+	var rgb = hsv2rgb(x,1.0,1.0);
+	var MAX = 4095;
+	var params = {};
+	var R = rgb[0] * MAX;
+	var G = rgb[1] * MAX;
+	var B = rgb[2] * MAX;
+	/*var toLogarithmic = function(val,max) {
+		return max * (Math.log10(val+1)/Math.log10(max+1));
+	};
+	R = toLogarithmic(R,MAX);
+	G = toLogarithmic(G,MAX);
+	B = toLogarithmic(B,MAX);*/
+	R = Math.round(R);
+	G = Math.round(G);
+	B = Math.round(B);
+	params["pca9685_out_0_off"] = R;
+	params["pca9685_out_1_off"] = G;
+	params["pca9685_out_2_off"] = B;
+	send_params(params);
+}
+
+function do_step(cb) {
+	send_params({"fan0_pc": "1"});
+	setTimeout(function() {
+		send_params({"fan0_pc": "0"});
+		if(cb) cb();
+	},1);
+}
+
+var step_enabled = false;
+function step_iterate(ms) {
+	if(!step_enabled) return;
+	
+	var stepReady = function() {
+		setTimeout(function() {
+			step_iterate(ms);
+		},ms);
+	}
+	
+	do_step(stepReady);
+}
+
+function start_step(ms) {
+	step_enabled = true;
+	step_iterate(ms);
+}
+
+function stop_step() {
+	step_enabled = false;
+}
+
+// TEST: var wait_ms = 200; var ff=0; var f = function() {var xhr = new XMLHttpRequest(); xhr.open("GET","/api?fan0_pc="+ff,false); if(ff==0) ff=1; else ff=0; xhr.send(); setTimeout(f,wait_ms);}
+
+</script>
+<style>
+label {
+	display: inline-block;
+	min-width: 120px;
+}
+
+img, h2 {
+	display: inline-block;
+}
+
+/*body {
+	background-image: url(./Raspberry-Pi-3-top-down-web.jpg);
+	background-repeat: no-repeat;
+}*/
+</style>
+</head>
+<body onload="init()">
+<div>
+	<img src="favicon.png" style="margin-right: 20px;" />
+	<h2>Raspberry Pi Web Interface</h2>
+	<img src="favicon.png" style="margin-left: 20px;" />
+</div>
+
+<div>
+ <canvas id="test_canvas" width="360" height="100">  </canvas>
+</div>
+
+<!--<div>
+	<label>LED0 (%):</label><input id="led0_pc" type="number" min="0" max="100" value="0" />
+</div>
+<div>
+	<label>FAN0 (%):</label><input id="fan0_pc" type="number" min="0" max="100" value="0" />
+</div>
+<div>
+	<label>FAN0 RPM:</label><input id="fan0_rpm" type="text" value="0" readonly />
+</div>
+<input type="button" onclick="send();" value="Set">
+<input type="button" onclick="update();" value="Update">
+<br>-->
+<div>
+	<label>FAN:</label><input id="fan0_chk" type="checkbox" onclick="send_params({'fan0_pc': (this.checked)?('1'):('0')});">
+</div>
+<div>
+	<label>AD7705 CH0:</label><input id="adc_ch0" type="text">
+</div>
+<!--<input type="button" onclick="send_params({'fan0_pc': '1'});" value="Turn On">
+<input type="button" onclick="send_params({'fan0_pc': '0'});" value="Turn Off">-->
+
+<div id="pca9685">
+	<h3>PCA9685 I<sup>2</sup>C</h3>
+	<!--<div>
+		<label>General:</label><input id="gen_addr" type="text" value="0" /><input id="gen_val" type="text" value="0" />
+		<input type="button" id="gen_write" value="Write" /><input type="button" id="gen_read" value="Read" />
+	</div>-->
+	<div>
+		<input id="pca9685_update_btn" type="button" value="Update" />
+	</div>
+	<div>
+		<div>
+			<!--<label>I<sup>2</sup>C address:</label><input type="text" value="" /><input type="button" value="Set" />-->
+			<label>I<sup>2</sup>C address:</label><input type="text" value="0x40" readonly="readonly" />
+			
+		</div>
+		<div>
+			<label>PWM Frequency:</label><input id="pca9685_pwm_freq" type="text" value="" /><input type="button" id="pca9685_pwm_freq_set_btn" value="Set" />
+		</div>
+	</div>
+	<div id="pca9685_channels_div">
+		<!--<div>
+			<label>:</label><input type="text" value="" /><input type="button" value="Set" />
+		</div>-->
+	</div>
+</div>
+</body>
+</html>
